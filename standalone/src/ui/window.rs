@@ -3,17 +3,20 @@ use crate::config::{self, AppConfig};
 use crate::glib_channels::GlibSender;
 use crate::logging::LogBuffer;
 use crate::messages::{ConnectionProfile, TunnelCommand, TunnelStatus};
+use crate::tray::{CommandQueue, TrayCommand, TraySnapshot, TrayState, VpnTray};
 use crate::ui::connection_view::ConnectionView;
 use crate::ui::log_view::LogView;
 use crate::ui::profile_editor;
 use gtk4::prelude::*;
+use ksni::TrayMethods;
 use libadwaita as adw;
 use libadwaita::prelude::*;
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
-use tokio::sync::mpsc;
-use tracing::{error, info};
+use tokio::sync::{mpsc, watch};
+use tracing::{error, info, warn};
 
 pub struct MainWindow {
     pub window: adw::ApplicationWindow,
@@ -44,9 +47,46 @@ impl MainWindow {
         let tunnel_cmd_tx: Rc<RefCell<Option<mpsc::UnboundedSender<TunnelCommand>>>> =
             Rc::new(RefCell::new(None));
         let profile_keepalive: Rc<Cell<bool>> = Rc::new(Cell::new(false));
+        // Name of the profile the current attempt is using — the tray shows it
+        // while connecting, before any address has been negotiated.
+        let active_profile_name: Rc<RefCell<String>> = Rc::new(RefCell::new(String::new()));
+        let tray_state: Rc<RefCell<TrayState>> = Rc::new(RefCell::new(TrayState::Disconnected));
 
         // Shared status queue: tunnel thread pushes, UI thread polls
         let status_queue: Arc<Mutex<Vec<TunnelStatus>>> = Arc::new(Mutex::new(Vec::new()));
+
+        // Tray icon. Menu activations land in `tray_commands` for the UI tick to
+        // act on; state flows the other way over a watch channel. `tray_ready`
+        // gates close-to-tray: with no tray there would be no way to get the
+        // window back, so closing must keep quitting the app.
+        let tray_commands: CommandQueue = Arc::new(Mutex::new(Vec::new()));
+        let tray_ready = Arc::new(AtomicBool::new(false));
+        let (tray_snapshot_tx, mut tray_snapshot_rx) = watch::channel(TraySnapshot::initial());
+        {
+            let tray = VpnTray::new(tray_commands.clone());
+            let tray_ready = tray_ready.clone();
+            tokio_handle.spawn(async move {
+                let handle = match tray.spawn().await {
+                    Ok(handle) => handle,
+                    Err(e) => {
+                        warn!(
+                            "Could not register tray icon: {e} — \
+                             closing the window will quit the app"
+                        );
+                        return;
+                    }
+                };
+                tray_ready.store(true, Ordering::Relaxed);
+                info!("Tray icon registered — closing the window hides it to the tray");
+
+                while tray_snapshot_rx.changed().await.is_ok() {
+                    let snapshot = tray_snapshot_rx.borrow_and_update().clone();
+                    handle
+                        .update(move |tray: &mut VpnTray| tray.set_snapshot(snapshot))
+                        .await;
+                }
+            });
+        }
 
         // Layout
         let toolbar_view = adw::ToolbarView::new();
@@ -223,6 +263,7 @@ impl MainWindow {
             let tokio_handle = tokio_handle.clone();
             let status_queue = status_queue.clone();
             let profile_keepalive = profile_keepalive.clone();
+            let active_profile_name = active_profile_name.clone();
 
             connection_view.connect_btn.connect_clicked(move |_| {
                 let idx = dropdown.selected() as usize;
@@ -236,6 +277,7 @@ impl MainWindow {
 
                 let profile: ConnectionProfile = profile_cfg.into();
                 profile_keepalive.set(profile.keepalive);
+                active_profile_name.replace(profile.name.clone());
                 info!("Connecting to {}", profile.server);
 
                 // Create command channel
@@ -289,12 +331,18 @@ impl MainWindow {
             });
         }
 
-        // Periodic UI update: drain status queue + refresh log (every 100ms)
+        // Periodic UI update: drain status + tray queues, refresh log (every 100ms)
         {
             let connection_view = connection_view.clone();
             let log_view = log_view.clone();
             let status_queue = status_queue.clone();
             let profile_keepalive = profile_keepalive.clone();
+            let active_profile_name = active_profile_name.clone();
+            let tray_state = tray_state.clone();
+            let tray_commands = tray_commands.clone();
+            let window = window.clone();
+            let app = app.clone();
+            let tunnel_cmd_tx = tunnel_cmd_tx.clone();
             gtk4::glib::timeout_add_local(std::time::Duration::from_millis(100), move || {
                 // Drain status updates
                 let statuses: Vec<TunnelStatus> = {
@@ -307,6 +355,64 @@ impl MainWindow {
                     if matches!(status, TunnelStatus::Connected { .. }) && profile_keepalive.get() {
                         connection_view.keepalive_btn.set_active(true);
                     }
+                    if let Some(state) = tray_state_for(status, &active_profile_name.borrow()) {
+                        tray_state.replace(state);
+                    }
+                }
+
+                // Push to the tray only on a real change, so an idle app is not
+                // emitting D-Bus property updates ten times a second.
+                let snapshot = TraySnapshot {
+                    state: tray_state.borrow().clone(),
+                    window_visible: window.is_visible(),
+                };
+                tray_snapshot_tx.send_if_modified(|current| {
+                    if *current == snapshot {
+                        false
+                    } else {
+                        *current = snapshot;
+                        true
+                    }
+                });
+
+                // Carry out tray menu activations
+                let commands: Vec<TrayCommand> = {
+                    let mut q = tray_commands
+                        .lock()
+                        .expect("tray command queue lock poisoned");
+                    q.drain(..).collect()
+                };
+                for command in commands {
+                    match command {
+                        TrayCommand::ToggleWindow => {
+                            if window.is_visible() {
+                                window.set_visible(false);
+                            } else {
+                                window.present();
+                            }
+                        }
+                        // Reuse the buttons' own handlers rather than
+                        // duplicating the connect/disconnect logic.
+                        TrayCommand::Connect => connection_view.connect_btn.emit_clicked(),
+                        TrayCommand::Disconnect => connection_view.disconnect_btn.emit_clicked(),
+                        TrayCommand::Quit => {
+                            // Ask the tunnel to tear down first; the runtime's
+                            // shutdown timeout in `app` gives it time to finish.
+                            // The sender outlives the tunnel it belonged to, so
+                            // only send while a tunnel is actually up.
+                            let tunnel_active =
+                                !matches!(*tray_state.borrow(), TrayState::Disconnected);
+                            if tunnel_active {
+                                if let Some(tx) = tunnel_cmd_tx.borrow().as_ref() {
+                                    if let Err(e) = tx.send(TunnelCommand::Disconnect) {
+                                        error!("Failed to send disconnect before quit: {e}");
+                                    }
+                                }
+                            }
+                            info!("Quit requested from tray");
+                            app.quit();
+                        }
+                    }
                 }
 
                 // Update connection timer
@@ -316,6 +422,21 @@ impl MainWindow {
                 log_view.refresh();
 
                 gtk4::glib::ControlFlow::Continue
+            });
+        }
+
+        // Closing the window collapses to the tray and leaves the tunnel up.
+        // Without a tray there would be no way back, so fall back to quitting.
+        {
+            let tray_ready = tray_ready.clone();
+            window.connect_close_request(move |win| {
+                if tray_ready.load(Ordering::Relaxed) {
+                    info!("Window closed — collapsing to tray");
+                    win.set_visible(false);
+                    gtk4::glib::Propagation::Stop
+                } else {
+                    gtk4::glib::Propagation::Proceed
+                }
             });
         }
 
@@ -375,5 +496,36 @@ impl MainWindow {
         }
 
         MainWindow { window }
+    }
+}
+
+/// Map a tunnel status onto the coarser view the tray presents.
+///
+/// `None` means this status does not change what the tray shows — statistics
+/// and the transient disconnecting state are left to the main window.
+fn tray_state_for(status: &TunnelStatus, profile: &str) -> Option<TrayState> {
+    match status {
+        TunnelStatus::Connecting
+        | TunnelStatus::Handshaking
+        | TunnelStatus::NegotiatingLcp
+        | TunnelStatus::Authenticating
+        | TunnelStatus::NegotiatingIpcp => Some(TrayState::Connecting {
+            profile: profile.to_string(),
+        }),
+        TunnelStatus::Connected {
+            local_ip,
+            remote_ip,
+            default_gateway,
+            ..
+        } => Some(TrayState::Connected {
+            profile: profile.to_string(),
+            local_ip: *local_ip,
+            gateway: *remote_ip,
+            full_tunnel: *default_gateway,
+        }),
+        TunnelStatus::Disconnected | TunnelStatus::Error(_) | TunnelStatus::AuthFailed => {
+            Some(TrayState::Disconnected)
+        }
+        TunnelStatus::Disconnecting | TunnelStatus::Stats { .. } => None,
     }
 }

@@ -247,7 +247,7 @@ impl ConnectionView {
                 ));
 
                 let routing_text = if *default_gateway {
-                    "Routing: All traffic (default gateway)".to_string()
+                    "Routing: All traffic through tunnel (full tunnel)".to_string()
                 } else {
                     let mut parts: Vec<String> = Vec::new();
                     if let Some(subnet) = remote_network_route {

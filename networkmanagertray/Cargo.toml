@@ -9,6 +9,7 @@ name = "draytek-vpn-tray"
 path = "src/main.rs"
 
 [dependencies]
+draytek-vpn-trayicons = { path = "../trayicons" }
 ksni = "0.3"
 zbus = { version = "5", features = ["tokio"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "fs", "sync"] }

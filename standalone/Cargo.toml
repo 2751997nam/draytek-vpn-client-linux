@@ -19,6 +19,9 @@ draytek-vpn-protocol = { path = "../protocol" }
 # UI
 gtk4 = "0.9"
 libadwaita = { version = "0.7", features = ["v1_5"] }
+# System tray (StatusNotifierItem)
+ksni = "0.3"
+draytek-vpn-trayicons = { path = "../trayicons" }
 
 # Async
 tokio = { version = "1", features = ["full"] }
@@ -57,10 +60,11 @@ name = "draytek-vpn-standalone"
 maintainer = "Julian"
 section = "net"
 priority = "optional"
-depends = "libgtk-4-1, libadwaita-1-0, libssl3, polkit"
+depends = "$auto, polkitd | policykit-1 | polkit"
 assets = [
     ["target/release/draytek-vpn", "usr/bin/", "755"],
     ["target/release/draytek-vpn-helper", "usr/lib/draytek-vpn/", "755"],
     ["data/com.draytek.vpn.policy", "usr/share/polkit-1/actions/", "644"],
     ["data/draytek-vpn.desktop", "usr/share/applications/", "644"],
+    ["data/icons/draytek-vpn.svg", "usr/share/icons/hicolor/scalable/apps/", "644"],
 ]

@@ -2,9 +2,10 @@
 use anyhow::{bail, Context, Result};
 use base64::Engine;
 use openssl::ssl::{SslConnector, SslMethod, SslOptions, SslVerifyMode};
+use std::net::SocketAddr;
 use std::pin::Pin;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::TcpStream;
+use tokio::net::{lookup_host, TcpStream};
 use tokio_openssl::SslStream;
 use tracing::{debug, info};
 
@@ -19,17 +20,16 @@ pub async fn connect(
     username: &str,
     password: &str,
     accept_self_signed: bool,
+    prefer_ipv4: bool,
 ) -> Result<SslStream<TcpStream>> {
     // Step 1: TCP connection
-    let addr = format!("{server}:{port}");
-    info!("Connecting to {addr}");
+    info!("Connecting to {server}:{port}");
     let tcp_stream = tokio::time::timeout(
         std::time::Duration::from_secs(15),
-        TcpStream::connect(&addr),
+        connect_tcp(server, port, prefer_ipv4),
     )
     .await
-    .context("TCP connect timeout")?
-    .context("TCP connect failed")?;
+    .context("TCP connect timeout")??;
 
     tcp_stream
         .set_nodelay(true)
@@ -89,9 +89,7 @@ pub async fn connect(
             .context("Failed to read HTTP response")?;
         response_buf.push(byte[0]);
         // Look for \r\n\r\n (end of HTTP headers)
-        if response_buf.len() >= 4
-            && response_buf[response_buf.len() - 4..] == [b'\r', b'\n', b'\r', b'\n']
-        {
+        if response_buf.len() >= 4 && response_buf[response_buf.len() - 4..] == *b"\r\n\r\n" {
             break;
         }
         if response_buf.len() > 4096 {
@@ -114,6 +112,55 @@ pub async fn connect(
     Ok(tls_stream)
 }
 
+/// Resolve `server:port` and connect to the first address that answers.
+///
+/// `TcpStream::connect` on a hostname already walks the resolver's list, but it
+/// gives no say in the order. Resolving here lets IPv4 be tried first while
+/// still falling back to every other address, so the preference never strands a
+/// host that is only reachable over one family.
+async fn connect_tcp(server: &str, port: u16, prefer_ipv4: bool) -> Result<TcpStream> {
+    let mut addrs: Vec<SocketAddr> = lookup_host((server, port))
+        .await
+        .with_context(|| format!("Failed to resolve {server}:{port}"))?
+        .collect();
+
+    if addrs.is_empty() {
+        bail!("{server}:{port} resolved to no addresses");
+    }
+
+    order_addresses(&mut addrs, prefer_ipv4);
+    debug!("Resolved {server}:{port} to {addrs:?}");
+
+    let mut last: Option<(SocketAddr, std::io::Error)> = None;
+    for &addr in &addrs {
+        match TcpStream::connect(addr).await {
+            Ok(stream) => {
+                info!("Connected to {addr}");
+                return Ok(stream);
+            }
+            Err(e) => {
+                debug!("Connection to {addr} failed: {e}");
+                last = Some((addr, e));
+            }
+        }
+    }
+
+    let (addr, e) = last.expect("a non-empty address list always records a failure");
+    Err(e).with_context(|| {
+        format!("Could not connect to any address for {server}:{port} (last tried {addr})")
+    })
+}
+
+/// Put IPv4 addresses first when preferred.
+///
+/// The sort is stable, so the resolver's own ordering survives within each
+/// family, and leaving `prefer_ipv4` off keeps the system order untouched.
+fn order_addresses(addrs: &mut [SocketAddr], prefer_ipv4: bool) {
+    if prefer_ipv4 {
+        addrs.sort_by_key(|addr| !addr.is_ipv4());
+    }
+}
+
 /// Parse status code from an HTTP response line like "HTTP/1.0 200 OK".
 fn parse_http_status(line: &str) -> Result<u16> {
     let re = regex::Regex::new(r"HTTP/[\d.]+ (\d+)").unwrap();
@@ -125,6 +172,51 @@ fn parse_http_status(line: &str) -> Result<u16> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn addrs(specs: &[&str]) -> Vec<SocketAddr> {
+        specs.iter().map(|s| s.parse().unwrap()).collect()
+    }
+
+    #[test]
+    fn prefers_ipv4_while_keeping_resolver_order_within_a_family() {
+        let mut list = addrs(&[
+            "[2001:db8::1]:443",
+            "192.0.2.1:443",
+            "[2001:db8::2]:443",
+            "192.0.2.2:443",
+        ]);
+        order_addresses(&mut list, true);
+        assert_eq!(
+            list,
+            addrs(&[
+                "192.0.2.1:443",
+                "192.0.2.2:443",
+                "[2001:db8::1]:443",
+                "[2001:db8::2]:443"
+            ])
+        );
+    }
+
+    #[test]
+    fn leaves_order_alone_when_not_preferring_ipv4() {
+        let original = addrs(&["[2001:db8::1]:443", "192.0.2.1:443"]);
+        let mut list = original.clone();
+        order_addresses(&mut list, false);
+        assert_eq!(list, original);
+    }
+
+    #[test]
+    fn preference_is_a_no_op_for_single_family_results() {
+        for specs in [
+            &["192.0.2.1:443", "192.0.2.2:443"],
+            &["[2001:db8::1]:443", "[2001:db8::2]:443"],
+        ] {
+            let original = addrs(specs);
+            let mut list = original.clone();
+            order_addresses(&mut list, true);
+            assert_eq!(list, original, "single-family list must not be reordered");
+        }
+    }
 
     #[test]
     fn test_parse_http_status() {

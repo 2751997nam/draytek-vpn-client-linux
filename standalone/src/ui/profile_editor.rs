@@ -83,9 +83,27 @@ pub fn show_profile_editor(
         .active(true)
         .build();
     let default_gw_row = adw::SwitchRow::builder()
-        .title("Use as Default Gateway")
-        .tooltip_text("Route all internet traffic through the VPN tunnel")
+        .title("Send All Traffic Through This Tunnel")
+        .subtitle("Full tunnel — internet traffic goes via the VPN")
+        .tooltip_text(
+            "Routes everything through the VPN, the same as Advanced →\n\
+             \"Send all traffic through this tunnel\" in the Windows Smart VPN Client.\n\n\
+             The connection to the VPN server itself is automatically excluded,\n\
+             and your existing default route is restored on disconnect.",
+        )
         .active(false)
+        .build();
+    let prefer_ipv4_row = adw::SwitchRow::builder()
+        .title("Prefer IPv4")
+        .subtitle("Try the server's IPv4 address first")
+        .tooltip_text(
+            "When the server name resolves to both IPv4 and IPv6 addresses,\n\
+             connect over IPv4 first. IPv6 is still tried if IPv4 fails.\n\n\
+             The tunnel itself carries IPv4 only, and \"Send All Traffic Through\n\
+             This Tunnel\" cannot be used with an IPv6 server, so this is\n\
+             normally best left on.",
+        )
+        .active(true)
         .build();
     let keepalive_row = adw::SwitchRow::builder()
         .title("Keepalive")
@@ -128,6 +146,7 @@ pub fn show_profile_editor(
     opts_group.add(&routes_row);
     opts_group.add(&default_gw_row);
     opts_group.add(&keepalive_row);
+    opts_group.add(&prefer_ipv4_row);
     opts_group.add(&self_signed_row);
     opts_group.add(&mru_row);
     prefs_page.add(&opts_group);
@@ -144,6 +163,7 @@ pub fn show_profile_editor(
         route_remote_row.set_active(profile.route_remote_network);
         default_gw_row.set_active(profile.default_gateway);
         keepalive_row.set_active(profile.keepalive);
+        prefer_ipv4_row.set_active(profile.prefer_ipv4);
         mru_row.set_value(profile.mru as f64);
         routes_row.set_text(&profile.routes.join(", "));
     }
@@ -235,6 +255,7 @@ pub fn show_profile_editor(
             default_gateway: default_gw_row.is_active(),
             keepalive: keepalive_row.is_active(),
             mru: mru_row.value() as u16,
+            prefer_ipv4: prefer_ipv4_row.is_active(),
             routes,
         };
         on_save(profile);

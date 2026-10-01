@@ -47,7 +47,26 @@ pub fn build_app() {
         .application_id("com.draytek.vpn.linux")
         .build();
 
+    // Name the installed hicolor icon so the window and taskbar entry use it.
+    // The application id does not match the icon's basename, so GTK cannot
+    // infer this on its own.
+    //
+    // This must run on `startup`, not before `run()`: GTK is not initialised
+    // until then, and the setter panics if it is called earlier. `startup` also
+    // fires exactly once, unlike `activate`.
+    app.connect_startup(|_| {
+        gtk4::Window::set_default_icon_name("draytek-vpn");
+    });
+
     app.connect_activate(move |app| {
+        // Activation fires again whenever the app is launched while already
+        // running — clicking the launcher while it sits hidden in the tray, for
+        // instance. Raise the window we already have instead of building a
+        // second one (which would also register a second tray icon).
+        if let Some(existing) = app.windows().first() {
+            existing.present();
+            return;
+        }
         let main_window = MainWindow::new(app, log_buffer.clone(), tokio_handle.clone());
         main_window.window.present();
     });

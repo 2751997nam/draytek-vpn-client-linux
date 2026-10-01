@@ -26,6 +26,11 @@ pub struct ConnectionProfile {
     pub keepalive: bool,
     /// Maximum Receive Unit (MRU) we propose during LCP. 0 = use default (1280).
     pub mru: u16,
+    /// Try the server's IPv4 addresses before its IPv6 ones.
+    ///
+    /// Only reorders the attempts — every resolved address is still tried, so a
+    /// host reachable solely over IPv6 still connects.
+    pub prefer_ipv4: bool,
 }
 
 impl Default for ConnectionProfile {
@@ -42,6 +47,10 @@ impl Default for ConnectionProfile {
             routes: Vec::new(),
             keepalive: false,
             mru: 0,
+            // The tunnel is IPv4-only throughout (IPCP, the helper's addresses
+            // and routes, and full-tunnel mode, which cannot pin an IPv6
+            // server's route), so the carrier connection defaults to matching.
+            prefer_ipv4: true,
         }
     }
 }

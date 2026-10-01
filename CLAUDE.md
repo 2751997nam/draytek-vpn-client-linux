@@ -4,11 +4,12 @@ Native Linux SSL VPN client for DrayTek routers. Same protocol as the Windows Sm
 
 ## Workspace Layout
 
-Cargo workspace with four members:
+Cargo workspace with five members:
 
 - `protocol/` — `draytek-vpn-protocol` lib: TLS connect, SSTP framing, PPP FSM, LCP/IPCP/auth (PAP + MS-CHAPv2), keepalive. Used by all binaries.
-- `standalone/` — `draytek-vpn` GTK4/libadwaita desktop app + `draytek-vpn-helper` (Polkit-elevated for TUN/routes/DNS). `standalone/src/tunnel/engine.rs` is the GUI data loop.
+- `standalone/` — `draytek-vpn` GTK4/libadwaita desktop app + `draytek-vpn-helper` (Polkit-elevated for TUN/routes/DNS). `standalone/src/tunnel/engine.rs` is the GUI data loop. Has its own tray icon (`standalone/src/tray.rs`): closing the window hides it to the tray and leaves the tunnel up, gated on the tray actually registering — see `tray_ready` in `ui/window.rs`.
 - `networkmanager/` — `draytek-vpn-nm` VPN plugin on the system D-Bus (runs as root under NM). GTK3/GTK4 editor `.so` and auth-dialog are C (`networkmanager/editor/`, `networkmanager/auth-dialog/`). `networkmanager/src/tunnel.rs` is the NM data loop.
+- `trayicons/` — `draytek-vpn-trayicons` lib: the coloured shield pixmaps both trays render. Shapes are analytic in the unit square, supersampled 4×4, emitted at 22/32/44 px. Do not swap these for themed icon names — a `network-*-symbolic` glyph is indistinguishable from the system's own tray icons.
 - `networkmanagertray/` — `draytek-vpn-tray` ksni StatusNotifier tray. Watches NM over D-Bus (`nm_monitor.rs`), renders via `tray_impl.rs`. Autostarts on session login via `networkmanagertray/data/draytek-vpn-tray.desktop` installed to `/etc/xdg/autostart/`. Single-instance via the well-known session-bus name `com.draytek.vpn.Tray` (DoNotQueue): second invocation exits cleanly.
 
 ## Build & Test
@@ -88,6 +89,8 @@ Both the library (`protocol/`) and the binaries use `anyhow::Result` end-to-end.
 - `networkmanager/src/plugin.rs` — `org.freedesktop.NetworkManager.VPN.Plugin` D-Bus interface
 - `networkmanagertray/src/nm_monitor.rs` — NM D-Bus watcher; `VpnState` enum flows to tray via `tokio::sync::watch`
 - `networkmanagertray/src/tray_impl.rs` — ksni rendering of `VpnState` (icon, tooltip, menu, keepalive status display)
+- `standalone/src/tray.rs` — standalone app's tray; holds no state of its own, exchanging `TraySnapshot`/`TrayCommand` with the GTK thread because widgets are not `Send`
+- `trayicons/src/lib.rs` — shared shield icon rendering
 - `networkmanager/editor/nm-draytek-editor.c` — C editor plugin, GTK3/GTK4 variants built from the same sources
 
 ## Remotes

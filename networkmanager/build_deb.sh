@@ -77,7 +77,7 @@ Maintainer: Julian
 Section: net
 Priority: optional
 Installed-Size: $INSTALLED_SIZE
-Depends: network-manager, libssl3, libnm0, libgtk-4-1, libgtk-3-0
+Depends: network-manager, libssl3t64 | libssl3, libnm0, libgtk-4-1, libgtk-3-0
 Description: DrayTek SSL VPN NetworkManager plugin
  Integrates DrayTek SSL VPN into NetworkManager so VPN connections
  appear in GNOME Settings, KDE, Cinnamon, or any NM frontend.

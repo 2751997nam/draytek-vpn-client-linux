@@ -1,0 +1,45 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512">
+  <!--
+    DrayTek SSL VPN application icon.
+
+    The shield silhouette is the same one the tray icons draw (see
+    trayicons/src/lib.rs): rounded top corners, straight sides, elliptical
+    taper to a rounded point. Keeping them identical means the launcher entry
+    and the tray icon read as the same application.
+
+    The tray colours the shield by connection state (green / amber / red) and
+    fills it with a state glyph; the app icon is a state-neutral blue with a
+    padlock, so the two are never confused.
+
+    Keep this comment inside <svg>: gdk-pixbuf sniffs only the start of the
+    file to identify the format, and a long leading comment pushes the opening
+    tag out of that window, making the icon unloadable.
+  -->
+  <defs>
+    <linearGradient id="shield" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#4F8EF7"/>
+      <stop offset="1" stop-color="#1B4FD8"/>
+    </linearGradient>
+  </defs>
+
+  <path fill="url(#shield)"
+        d="M 126.98,35.84
+           H 385.02
+           A 55.30,81.10 0 0 1 440.32,116.94
+           V 283.65
+           A 184.32,202.75 0 0 1 256.00,486.40
+           A 184.32,202.75 0 0 1 71.68,283.65
+           V 116.94
+           A 55.30,81.10 0 0 1 126.98,35.84
+           Z"/>
+
+  <path fill="none" stroke="#FFFFFF" stroke-width="26" stroke-linecap="round"
+        d="M 210,205 V 180 A 46,46 0 0 1 302,180 V 205"/>
+
+  <path fill="#FFFFFF" fill-rule="evenodd"
+        d="M 199,205 H 313 A 18,18 0 0 1 331,223 V 312 A 18,18 0 0 1 313,330
+           H 199 A 18,18 0 0 1 181,312 V 223 A 18,18 0 0 1 199,205 Z
+           M 256,234 A 18,18 0 1 0 256,270 A 18,18 0 1 0 256,234 Z
+           M 249,262 H 263 L 266,302 H 246 Z"/>
+</svg>

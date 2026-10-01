@@ -42,6 +42,9 @@ struct SetupArgs {
     routes: Vec<String>,
     default_gw: Option<Ipv4Addr>,
     dns: Option<Ipv4Addr>,
+    /// Address the TLS tunnel is carried over. Pinned to its pre-VPN route when
+    /// `default_gw` is set.
+    vpn_server: Option<Ipv4Addr>,
 }
 
 struct TeardownArgs {
@@ -58,6 +61,7 @@ fn parse_setup_args(args: &[String]) -> Result<SetupArgs, Box<dyn std::error::Er
     let mut routes = Vec::new();
     let mut default_gw = None;
     let mut dns = None;
+    let mut vpn_server = None;
 
     let mut i = 0;
     while i < args.len() {
@@ -118,6 +122,14 @@ fn parse_setup_args(args: &[String]) -> Result<SetupArgs, Box<dyn std::error::Er
                         .parse::<Ipv4Addr>()?,
                 );
             }
+            "--vpn-server" => {
+                i += 1;
+                vpn_server = Some(
+                    args.get(i)
+                        .ok_or("--vpn-server requires a value")?
+                        .parse::<Ipv4Addr>()?,
+                );
+            }
             other => return Err(format!("Unknown option: {other}").into()),
         }
         i += 1;
@@ -132,6 +144,7 @@ fn parse_setup_args(args: &[String]) -> Result<SetupArgs, Box<dyn std::error::Er
         routes,
         default_gw,
         dns,
+        vpn_server,
     })
 }
 
@@ -251,6 +264,115 @@ fn direct_dns_setup(dns_ip: Ipv4Addr) -> Result<(), Box<dyn std::error::Error>> 
     Ok(())
 }
 
+// ── Full-tunnel routing helpers ──────────────────────────────────────────
+
+/// Records the host route that pins the VPN server to its pre-tunnel path.
+///
+/// That route lives on the *physical* interface, so deleting the TUN device
+/// does not clean it up — teardown has to remove it explicitly, including
+/// after a crash, which is why it is persisted rather than passed as an arg.
+const SERVER_ROUTE_STATE: &str = "/run/draytek-vpn-hostroute";
+
+/// Extract `via <gateway>` and `dev <iface>` from `ip route get` output.
+///
+/// Only the first line describes the route — `ip` appends further lines such as
+/// `cache` — so trailing lines are deliberately ignored.
+///
+/// A destination on a directly attached network has no `via`, hence the Option.
+fn parse_route_get(output: &str) -> Option<(Option<Ipv4Addr>, String)> {
+    let tokens: Vec<&str> = output.lines().next()?.split_whitespace().collect();
+    let after = |key: &str| {
+        tokens
+            .iter()
+            .position(|t| *t == key)
+            .and_then(|i| tokens.get(i + 1))
+            .copied()
+    };
+    let via = after("via").and_then(|s| s.parse::<Ipv4Addr>().ok());
+    let dev = after("dev")?.to_string();
+    Some((via, dev))
+}
+
+/// Pin the VPN server to the route it uses right now, before the tunnel claims
+/// the default route.
+///
+/// Without this the TLS connection carrying the tunnel would itself be routed
+/// into the tunnel, which deadlocks the link the moment full-tunnel mode
+/// engages. Must be called while the routing table still reflects pre-VPN state.
+fn pin_server_route(server: Ipv4Addr, tun_device: &str) -> Result<(), Box<dyn std::error::Error>> {
+    let server_str = server.to_string();
+    let output = Command::new("ip")
+        .args(["route", "get", &server_str])
+        .output()?;
+    if !output.status.success() {
+        return Err(format!(
+            "`ip route get {server_str}` failed: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        )
+        .into());
+    }
+
+    let route = String::from_utf8_lossy(&output.stdout);
+    let (via, dev) = parse_route_get(&route)
+        .ok_or_else(|| format!("Could not parse route to {server_str}: {}", route.trim()))?;
+
+    if dev == tun_device {
+        return Err(format!(
+            "Route to VPN server {server_str} already points at {tun_device}; \
+             refusing to pin the tunnel to itself"
+        )
+        .into());
+    }
+
+    let mut spec = vec![format!("{server_str}/32")];
+    if let Some(gw) = via {
+        spec.push("via".to_string());
+        spec.push(gw.to_string());
+    }
+    spec.push("dev".to_string());
+    spec.push(dev);
+
+    // `replace` rather than `add` so a leftover route from a crashed session
+    // is overwritten instead of failing the whole setup with EEXIST.
+    let mut cmd_args = vec!["route", "replace"];
+    cmd_args.extend(spec.iter().map(String::as_str));
+    run_cmd("ip", &cmd_args)?;
+
+    std::fs::write(SERVER_ROUTE_STATE, spec.join(" "))
+        .map_err(|e| format!("Failed to record server route to {SERVER_ROUTE_STATE}: {e}"))?;
+
+    eprintln!("Pinned VPN server route: {}", spec.join(" "));
+    Ok(())
+}
+
+/// Remove the VPN server host route recorded by `pin_server_route`.
+///
+/// Best-effort: a failure here must not stop the rest of teardown.
+fn unpin_server_route() {
+    if !std::path::Path::new(SERVER_ROUTE_STATE).exists() {
+        return;
+    }
+
+    match std::fs::read_to_string(SERVER_ROUTE_STATE) {
+        Ok(spec) => {
+            let args: Vec<&str> = spec.split_whitespace().collect();
+            // Re-validate: only ever hand back a route spec of the shape we wrote.
+            if args.is_empty() || validate_cidr(args[0]).is_err() {
+                eprintln!("Warning: ignoring malformed server route state: '{spec}'");
+            } else {
+                let mut cmd_args = vec!["route", "del"];
+                cmd_args.extend_from_slice(&args);
+                if let Err(e) = run_cmd("ip", &cmd_args) {
+                    eprintln!("Warning: failed to remove server host route: {e}");
+                }
+            }
+        }
+        Err(e) => eprintln!("Warning: failed to read {SERVER_ROUTE_STATE}: {e}"),
+    }
+
+    let _ = std::fs::remove_file(SERVER_ROUTE_STATE);
+}
+
 // ── Subcommands ───────────────────────────────────────────────────────────────
 
 fn cmd_setup(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
@@ -267,10 +389,8 @@ fn cmd_setup(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
     let local_ip_str = setup.local_ip.to_string();
     let peer_ip_str = setup.peer_ip.to_string();
     let mtu_str = setup.mtu.to_string();
-    let addr_spec = format!("{local_ip_str} peer {peer_ip_str}");
-    let _ = addr_spec; // used below via individual parts
 
-    // 1. Create TUN device owned by user (remove stale device from prior session if present)
+    // 1. Remove a stale device left behind by a previous session
     if std::path::Path::new(&format!("/sys/class/net/{}", setup.device)).exists() {
         eprintln!("Note: removing stale {} device", setup.device);
         let _ = run_cmd(
@@ -278,6 +398,20 @@ fn cmd_setup(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
             &["tuntap", "del", "dev", &setup.device, "mode", "tun"],
         );
     }
+
+    // 2. Pin the VPN server's own traffic to the pre-tunnel path. Only matters
+    //    in full-tunnel mode, and only works before any tunnel route exists.
+    if setup.default_gw.is_some() {
+        match setup.vpn_server {
+            Some(server) => pin_server_route(server, &setup.device)?,
+            None => eprintln!(
+                "Warning: --default-gw without --vpn-server; the tunnel's own \
+                 connection may be routed into the tunnel"
+            ),
+        }
+    }
+
+    // 3. Create TUN device owned by user
     run_cmd(
         "ip",
         &[
@@ -292,7 +426,7 @@ fn cmd_setup(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
         ],
     )?;
 
-    // 2. Configure IP address
+    // 4. Configure IP address
     run_cmd(
         "ip",
         &[
@@ -306,32 +440,32 @@ fn cmd_setup(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
         ],
     )?;
 
-    // 3. Set MTU and bring up
+    // 5. Set MTU and bring up
     run_cmd("ip", &["link", "set", &setup.device, "mtu", &mtu_str, "up"])?;
 
-    // 4. Add routes
+    // 6. Add routes
     for route in &setup.routes {
         run_cmd("ip", &["route", "add", route, "dev", &setup.device])?;
     }
 
-    // 5. Default gateway
+    // 7. Send all traffic through the tunnel.
+    //
+    //    Two /1 routes rather than a second `default`: they are more specific
+    //    than any default route, so they win without depending on metrics and
+    //    without disturbing the existing default (which stays as the fallback
+    //    once the tunnel goes away). They also vanish with the TUN device.
     if let Some(gw) = setup.default_gw {
         let gw_str = gw.to_string();
-        run_cmd(
-            "ip",
-            &[
-                "route",
-                "add",
-                "default",
-                "via",
-                &gw_str,
-                "dev",
-                &setup.device,
-            ],
-        )?;
+        for half in ["0.0.0.0/1", "128.0.0.0/1"] {
+            run_cmd(
+                "ip",
+                &["route", "add", half, "via", &gw_str, "dev", &setup.device],
+            )?;
+        }
+        eprintln!("Full tunnel enabled: all traffic routed via {gw_str}");
     }
 
-    // 6. DNS configuration
+    // 8. DNS configuration
     if let Some(dns_ip) = setup.dns {
         if try_resolvectl_dns_setup(&setup.device, dns_ip) {
             eprintln!("DNS configured via resolvectl for {}", setup.device);
@@ -402,7 +536,10 @@ fn cmd_teardown(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
         eprintln!("Warning: failed to delete {}: {e}", teardown.device);
     }
 
-    // 4. Restore DNS (try both methods — safe no-ops if nothing to do)
+    // 4. Remove the VPN server host route from the physical interface
+    unpin_server_route();
+
+    // 5. Restore DNS (try both methods — safe no-ops if nothing to do)
     if teardown.restore_dns {
         // Try resolvectl revert (no-op if resolvectl wasn't used or device is gone)
         match Command::new("resolvectl")
@@ -439,4 +576,89 @@ fn cmd_teardown(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
 
     eprintln!("Teardown complete for {}", teardown.device);
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_route_via_gateway() {
+        let line = "8.8.8.8 via 192.168.1.1 dev enp44s0 src 192.168.1.10 uid 1000";
+        let (via, dev) = parse_route_get(line).unwrap();
+        assert_eq!(via, Some(Ipv4Addr::new(192, 168, 1, 1)));
+        assert_eq!(dev, "enp44s0");
+    }
+
+    #[test]
+    fn parses_on_link_route_without_gateway() {
+        // A server on a directly attached network has no `via` hop.
+        let line = "192.168.1.1 dev enp44s0 src 192.168.1.10 uid 1000";
+        let (via, dev) = parse_route_get(line).unwrap();
+        assert_eq!(via, None);
+        assert_eq!(dev, "enp44s0");
+    }
+
+    #[test]
+    fn ignores_trailing_lines_of_route_output() {
+        // Real `ip route get` output puts "cache" on a following line.
+        let output = "8.8.8.8 via 192.168.1.1 dev enp44s0 src 192.168.1.10 uid 1000 \n    cache \n";
+        let (via, dev) = parse_route_get(output).unwrap();
+        assert_eq!(via, Some(Ipv4Addr::new(192, 168, 1, 1)));
+        assert_eq!(dev, "enp44s0");
+    }
+
+    #[test]
+    fn rejects_route_output_without_device() {
+        assert!(parse_route_get("unreachable 8.8.8.8").is_none());
+        assert!(parse_route_get("").is_none());
+    }
+
+    #[test]
+    fn parse_setup_args_accepts_vpn_server() {
+        let args: Vec<String> = [
+            "--device",
+            "draytek0",
+            "--uid",
+            "1000",
+            "--local-ip",
+            "10.0.0.10",
+            "--peer-ip",
+            "10.0.0.1",
+            "--mtu",
+            "1280",
+            "--default-gw",
+            "10.0.0.1",
+            "--vpn-server",
+            "203.0.113.5",
+        ]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+
+        let setup = parse_setup_args(&args).unwrap();
+        assert_eq!(setup.vpn_server, Some(Ipv4Addr::new(203, 0, 113, 5)));
+        assert_eq!(setup.default_gw, Some(Ipv4Addr::new(10, 0, 0, 1)));
+    }
+
+    #[test]
+    fn parse_setup_args_leaves_vpn_server_unset_when_absent() {
+        let args: Vec<String> = [
+            "--device",
+            "draytek0",
+            "--uid",
+            "1000",
+            "--local-ip",
+            "10.0.0.10",
+            "--peer-ip",
+            "10.0.0.1",
+            "--mtu",
+            "1280",
+        ]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+
+        assert_eq!(parse_setup_args(&args).unwrap().vpn_server, None);
+    }
 }

@@ -40,12 +40,11 @@ impl ksni::Tray for VpnTray {
     }
 
     fn icon_pixmap(&self) -> Vec<ksni::Icon> {
-        let icon = match &self.vpn_state {
-            VpnState::Disconnected => &*crate::icons::DISCONNECTED,
-            VpnState::Connecting { .. } => &*crate::icons::CONNECTING,
-            VpnState::Connected { .. } => &*crate::icons::CONNECTED,
-        };
-        vec![icon.clone()]
+        match &self.vpn_state {
+            VpnState::Disconnected => draytek_vpn_trayicons::DISCONNECTED.clone(),
+            VpnState::Connecting { .. } => draytek_vpn_trayicons::CONNECTING.clone(),
+            VpnState::Connected { .. } => draytek_vpn_trayicons::CONNECTED.clone(),
+        }
     }
 
     fn status(&self) -> Status {

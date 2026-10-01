@@ -44,25 +44,16 @@ cp "$PROJECT_DIR/target/release/draytek-vpn" "$SCRIPT_DIR/AppDir/usr/bin/"
 cp "$PROJECT_DIR/target/release/draytek-vpn-helper" "$SCRIPT_DIR/AppDir/usr/lib/draytek-vpn/"
 cp "$SCRIPT_DIR/data/com.draytek.vpn.policy" "$SCRIPT_DIR/AppDir/usr/share/polkit-1/actions/"
 
-# ── Find or create an icon ─────────────────────────────────────────
-ICON_TMP="$(mktemp -d)/draytek-vpn.png"
-# Try common icon locations, fall back to generating a simple one
-if [[ -f "/usr/share/icons/Mint-Y/devices/128/network-vpn.png" ]]; then
-    cp /usr/share/icons/Mint-Y/devices/128/network-vpn.png "$ICON_TMP"
-elif FOUND_ICON=$(find /usr/share/icons -name "network-vpn.png" -size +1k 2>/dev/null | head -1) && [[ -n "$FOUND_ICON" ]]; then
-    cp "$FOUND_ICON" "$ICON_TMP"
-elif FOUND_SVG=$(find /usr/share/icons -name "network-vpn.svg" 2>/dev/null | head -1) && [[ -n "$FOUND_SVG" ]]; then
-    if command -v rsvg-convert &>/dev/null; then
-        rsvg-convert -w 256 -h 256 "$FOUND_SVG" -o "$ICON_TMP"
-    else
-        # linuxdeploy can handle SVG
-        ICON_TMP="${ICON_TMP%.png}.svg"
-        cp "$FOUND_SVG" "$ICON_TMP"
-    fi
-else
-    error "No network-vpn icon found. Install an icon theme or place an icon at standalone/data/draytek-vpn.png"
+# ── Icon ───────────────────────────────────────────────────────────
+# The app ships its own icon, so the AppImage no longer borrows a generic
+# network-vpn glyph from whatever icon theme the build host happens to have.
+ICON_SRC="$SCRIPT_DIR/data/icons/draytek-vpn.svg"
+if [[ ! -f "$ICON_SRC" ]]; then
+    error "Missing application icon: $ICON_SRC"
     exit 1
 fi
+mkdir -p "$SCRIPT_DIR/AppDir/usr/share/icons/hicolor/scalable/apps"
+cp "$ICON_SRC" "$SCRIPT_DIR/AppDir/usr/share/icons/hicolor/scalable/apps/"
 
 # ── Build AppImage ────────────────────────────────────────────────
 export DEPLOY_GTK_VERSION=4
@@ -72,7 +63,7 @@ export PATH="$TOOLS_DIR:$PATH"
     --appdir "$SCRIPT_DIR/AppDir" \
     --executable "$PROJECT_DIR/target/release/draytek-vpn" \
     --desktop-file "$SCRIPT_DIR/data/draytek-vpn.desktop" \
-    --icon-file "$ICON_TMP" \
+    --icon-file "$ICON_SRC" \
     --plugin gtk \
     --output appimage
 

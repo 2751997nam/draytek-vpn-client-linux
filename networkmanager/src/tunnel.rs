@@ -108,6 +108,12 @@ pub fn parse_settings(
         .get("keepalive")
         .map(|s: &String| s == "yes")
         .unwrap_or(false);
+    // Not exposed by the C editor yet; settable with
+    // `nmcli connection modify <name> +vpn.data prefer-ipv4=no`.
+    let prefer_ipv4 = data_map
+        .get("prefer-ipv4")
+        .map(|s: &String| s != "no")
+        .unwrap_or(true);
     let routes: Vec<String> = data_map
         .get("routes")
         .map(|s| {
@@ -126,6 +132,7 @@ pub fn parse_settings(
         password,
         accept_self_signed: !verify_cert,
         default_gateway: !never_default,
+        prefer_ipv4,
         route_remote_network,
         routes,
         keepalive,
@@ -253,6 +260,7 @@ async fn run_tunnel(
         &profile.username,
         &profile.password,
         profile.accept_self_signed,
+        profile.prefer_ipv4,
     )
     .await?;
 

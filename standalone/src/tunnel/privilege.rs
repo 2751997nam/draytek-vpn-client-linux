@@ -22,6 +22,21 @@ pub fn has_dns_backup() -> bool {
     std::path::Path::new("/run/draytek-vpn-resolv.bak").exists()
 }
 
+/// Everything the helper needs to bring a tunnel up.
+pub struct SetupConfig<'a> {
+    pub device: &'a str,
+    pub local_ip: Ipv4Addr,
+    pub peer_ip: Ipv4Addr,
+    pub mtu: u16,
+    pub routes: &'a [String],
+    /// `Some(gateway)` sends all traffic through the tunnel (full tunnel).
+    pub default_gw: Option<Ipv4Addr>,
+    pub dns: Option<Ipv4Addr>,
+    /// Address the TLS tunnel is carried over. The helper pins it to its
+    /// pre-tunnel route so full-tunnel mode cannot swallow its own carrier.
+    pub vpn_server: Option<Ipv4Addr>,
+}
+
 /// Find the helper binary path.
 ///
 /// Resolution order:
@@ -131,52 +146,55 @@ async fn run_helper(args: Vec<String>) -> Result<std::process::Output> {
 /// Set up the TUN device, routing, and DNS via the privileged helper.
 ///
 /// If the helper has CAP_NET_ADMIN, runs directly. Otherwise uses pkexec.
-pub async fn setup(
-    device: &str,
-    local_ip: Ipv4Addr,
-    peer_ip: Ipv4Addr,
-    mtu: u16,
-    routes: &[String],
-    default_gw: Option<Ipv4Addr>,
-    dns: Option<Ipv4Addr>,
-) -> Result<()> {
+pub async fn setup(cfg: SetupConfig<'_>) -> Result<()> {
     let helper = find_helper()?;
     let uid = current_uid();
 
     if needs_pkexec() {
-        info!("Requesting admin access (via pkexec) to create tunnel device {device}");
+        info!(
+            "Requesting admin access (via pkexec) to create tunnel device {}",
+            cfg.device
+        );
     } else {
-        info!("Creating tunnel device {device} using CAP_NET_ADMIN capability");
+        info!(
+            "Creating tunnel device {} using CAP_NET_ADMIN capability",
+            cfg.device
+        );
     }
 
     let mut args = vec![
         helper.clone(),
         "setup".to_string(),
         "--device".to_string(),
-        device.to_string(),
+        cfg.device.to_string(),
         "--uid".to_string(),
         uid.to_string(),
         "--local-ip".to_string(),
-        local_ip.to_string(),
+        cfg.local_ip.to_string(),
         "--peer-ip".to_string(),
-        peer_ip.to_string(),
+        cfg.peer_ip.to_string(),
         "--mtu".to_string(),
-        mtu.to_string(),
+        cfg.mtu.to_string(),
     ];
 
-    for route in routes {
+    for route in cfg.routes {
         args.push("--route".to_string());
         args.push(route.clone());
     }
 
-    if let Some(gw) = default_gw {
+    if let Some(gw) = cfg.default_gw {
         args.push("--default-gw".to_string());
         args.push(gw.to_string());
     }
 
-    if let Some(dns_ip) = dns {
+    if let Some(dns_ip) = cfg.dns {
         args.push("--dns".to_string());
         args.push(dns_ip.to_string());
+    }
+
+    if let Some(server) = cfg.vpn_server {
+        args.push("--vpn-server".to_string());
+        args.push(server.to_string());
     }
 
     let output = run_helper(args).await?;

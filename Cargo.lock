@@ -429,8 +429,10 @@ dependencies = [
  "digest",
  "dirs",
  "draytek-vpn-protocol",
+ "draytek-vpn-trayicons",
  "gtk4",
  "keyring",
+ "ksni",
  "libadwaita",
  "libc",
  "md4",
@@ -491,12 +493,20 @@ name = "draytek-vpn-tray"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "draytek-vpn-trayicons",
  "futures-util",
  "ksni",
  "tokio",
  "tracing",
  "tracing-subscriber",
  "zbus",
+]
+
+[[package]]
+name = "draytek-vpn-trayicons"
+version = "0.1.0"
+dependencies = [
+ "ksni",
 ]
 
 [[package]]

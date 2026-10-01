@@ -1,0 +1,8 @@
+[package]
+name = "draytek-vpn-trayicons"
+version = "0.1.0"
+edition = "2021"
+description = "Shared DrayTek VPN status icons for system tray indicators"
+
+[dependencies]
+ksni = "0.3"

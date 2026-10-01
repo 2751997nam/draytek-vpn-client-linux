@@ -90,8 +90,27 @@ async fn run_inner(
         &profile.username,
         &profile.password,
         profile.accept_self_signed,
+        profile.prefer_ipv4,
     )
     .await?;
+
+    // The address the tunnel is actually carried over — not necessarily what
+    // the profile says, since the hostname may resolve to several addresses.
+    // Full-tunnel mode needs the exact one to keep it out of the tunnel.
+    let vpn_server_ip = match tls_stream.get_ref().peer_addr() {
+        Ok(std::net::SocketAddr::V4(addr)) => Some(*addr.ip()),
+        Ok(std::net::SocketAddr::V6(addr)) => {
+            warn!(
+                "VPN server {} is IPv6 — cannot pin its route, full tunnel is unavailable",
+                addr.ip()
+            );
+            None
+        }
+        Err(e) => {
+            warn!("Could not determine VPN server address: {e}");
+            None
+        }
+    };
 
     status_tx.send(TunnelStatus::Handshaking);
 
@@ -109,6 +128,14 @@ async fn run_inner(
     );
 
     // Phase 3: Privileged setup (TUN device, routing, DNS) via pkexec helper
+    // Full tunnel needs the server pinned outside the tunnel; without a usable
+    // server address it would black-hole its own carrier, so refuse instead.
+    if profile.default_gateway && vpn_server_ip.is_none() {
+        bail!(
+            "Cannot send all traffic through the tunnel: the VPN server's IPv4 address \
+             is unknown, so its own connection could not be excluded from the tunnel"
+        );
+    }
     let default_gw = if profile.default_gateway {
         Some(neg.remote_ip)
     } else {
@@ -126,15 +153,16 @@ async fn run_inner(
     }
     routes.extend(profile.routes.iter().cloned());
 
-    privilege::setup(
-        TUN_DEVICE_NAME,
-        neg.local_ip,
-        neg.remote_ip,
-        neg.mtu,
-        &routes,
+    privilege::setup(privilege::SetupConfig {
+        device: TUN_DEVICE_NAME,
+        local_ip: neg.local_ip,
+        peer_ip: neg.remote_ip,
+        mtu: neg.mtu,
+        routes: &routes,
         default_gw,
-        neg.dns,
-    )
+        dns: neg.dns,
+        vpn_server: vpn_server_ip,
+    })
     .await
     .context("Privileged tunnel setup failed")?;
 

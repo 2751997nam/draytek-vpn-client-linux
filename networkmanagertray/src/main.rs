@@ -1,5 +1,4 @@
 mod format;
-mod icons;
 mod nm_monitor;
 mod stats;
 mod tray_impl;

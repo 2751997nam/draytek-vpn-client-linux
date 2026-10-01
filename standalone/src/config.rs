@@ -34,6 +34,9 @@ pub struct ProfileConfig {
     /// Maximum Receive Unit (MRU) proposed during LCP. 0 = default (1280).
     #[serde(default)]
     pub mru: u16,
+    /// Try the server's IPv4 addresses before its IPv6 ones.
+    #[serde(default = "default_true")]
+    pub prefer_ipv4: bool,
 }
 
 fn default_port() -> u16 {
@@ -60,6 +63,7 @@ impl From<ProfileConfig> for ConnectionProfile {
             routes: cfg.routes,
             keepalive: cfg.keepalive,
             mru: cfg.mru,
+            prefer_ipv4: cfg.prefer_ipv4,
         }
     }
 }
@@ -78,6 +82,7 @@ impl From<&ConnectionProfile> for ProfileConfig {
             routes: profile.routes.clone(),
             keepalive: profile.keepalive,
             mru: profile.mru,
+            prefer_ipv4: profile.prefer_ipv4,
         }
     }
 }
@@ -205,6 +210,7 @@ mod tests {
                 routes: vec!["10.0.0.0/8".to_string(), "172.16.0.0/12".to_string()],
                 keepalive: false,
                 mru: 0,
+                prefer_ipv4: true,
             }],
             last_selected: Some(0),
         };
@@ -240,6 +246,46 @@ mod tests {
     }
 
     #[test]
+    fn test_config_without_prefer_ipv4_defaults_to_on() {
+        // Profiles written before the option existed must keep working, and the
+        // absent key has to read as "prefer IPv4", not as false.
+        let toml_str = r#"
+            [[profiles]]
+            name = "Existing"
+            server = "vpn.example.com"
+            port = 443
+            username = "admin"
+        "#;
+        let parsed: AppConfig = toml::from_str(toml_str).unwrap();
+        assert!(parsed.profiles[0].prefer_ipv4);
+
+        let profile: ConnectionProfile = parsed.profiles[0].clone().into();
+        assert!(profile.prefer_ipv4);
+    }
+
+    #[test]
+    fn test_prefer_ipv4_survives_a_round_trip_when_disabled() {
+        let mut cfg = AppConfig::default();
+        cfg.profiles.push(ProfileConfig {
+            name: "No v6".to_string(),
+            server: "vpn.example.com".to_string(),
+            port: 443,
+            username: "admin".to_string(),
+            password: String::new(),
+            accept_self_signed: true,
+            default_gateway: false,
+            route_remote_network: true,
+            routes: vec![],
+            keepalive: false,
+            mru: 0,
+            prefer_ipv4: false,
+        });
+        let round_tripped: AppConfig =
+            toml::from_str(&toml::to_string_pretty(&cfg).unwrap()).unwrap();
+        assert!(!round_tripped.profiles[0].prefer_ipv4);
+    }
+
+    #[test]
     fn test_empty_config() {
         let config = AppConfig::default();
         let toml_str = toml::to_string_pretty(&config).unwrap();
@@ -262,6 +308,7 @@ mod tests {
             routes: vec![],
             keepalive: false,
             mru: 1400,
+            prefer_ipv4: true,
         };
         let profile: ConnectionProfile = cfg.into();
         assert_eq!(profile.name, "Test");

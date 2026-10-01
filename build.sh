@@ -50,6 +50,8 @@ detect_nm_plugin_dir() {
 }
 
 POLKIT_DIR="/usr/share/polkit-1/actions"
+APPLICATIONS_DIR="/usr/share/applications"
+ICON_DIR="/usr/share/icons/hicolor/scalable/apps"
 NM_PLUGIN_DIR="$(detect_nm_plugin_dir)"
 NM_VPN_DIR="/usr/lib/NetworkManager/VPN"
 NM_SERVICE_DIR="/usr/lib/NetworkManager"
@@ -91,6 +93,14 @@ app_install() {
     header "Install App"
     info "Installing polkit policy (requires sudo)"
     sudo install -m 644 standalone/data/com.draytek.vpn.policy "$POLKIT_DIR/"
+    info "Installing desktop entry and icon"
+    sudo install -Dm 644 standalone/data/draytek-vpn.desktop \
+        "$APPLICATIONS_DIR/draytek-vpn.desktop"
+    sudo install -Dm 644 standalone/data/icons/draytek-vpn.svg \
+        "$ICON_DIR/draytek-vpn.svg"
+    # Refresh the icon cache so the launcher picks the icon up immediately;
+    # harmless if the theme has no cache.
+    sudo gtk-update-icon-cache -qtf /usr/share/icons/hicolor 2>/dev/null || true
     info "Done. Run with: cargo run --bin draytek-vpn"
 }
 
@@ -109,7 +119,9 @@ app_deb() {
     fi
     cargo deb -p draytek-vpn
     info "Package built:"
-    ls -lh target/debian/draytek-vpn_*.deb
+    # Package name is draytek-vpn-standalone (set in standalone/Cargo.toml's
+    # [package.metadata.deb]), not the crate name.
+    ls -lh target/debian/draytek-vpn-standalone_*.deb
 }
 
 app_appimage() {
